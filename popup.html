@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>X 원본 이미지 다운로더</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="title-row">
+        <span class="badge">ORIG</span>
+        <h1>X 원본 미디어 다운로더</h1>
+      </div>
+    </header>
+
+    <form id="settings-form" class="form">
+      <div class="field">
+        <label for="folderPath">하위 폴더 이름 (다운로드 폴더 기준)</label>
+        <input
+          type="text"
+          id="folderPath"
+          name="folderPath"
+          placeholder="예: X_Images 또는 일러스트/트위터"
+          autocomplete="off"
+        />
+        <p class="hint">
+          다운로드 폴더 안에 생성할 하위 폴더명. 비워두면 다운로드 폴더에 바로 저장됨
+        </p>
+      </div>
+
+      <div class="field checkbox-field">
+        <label class="checkbox-label">
+          <input type="checkbox" id="subfolderByUser" name="subfolderByUser" />
+          <span>작성자(@아이디)별 하위 폴더 자동 생성</span>
+        </label>
+      </div>
+
+      <div class="field checkbox-field">
+        <label class="checkbox-label">
+          <input type="checkbox" id="convertGif" name="convertGif" />
+          <span>GIF를 실제 .gif 파일로 변환하여 저장</span>
+        </label>
+      </div>
+
+      <div class="field">
+        <label for="filenamePattern">파일명 형식</label>
+        <select id="filenamePattern" name="filenamePattern">
+          <option value="user_id_index">@아이디_트윗ID_순번 (예: user_12345_01.jpg)</option>
+          <option value="id_index">트윗ID_순번 (예: 12345_01.jpg)</option>
+          <option value="media_id">원본 미디어 ID (예: GbXyz123.jpg)</option>
+        </select>
+      </div>
+
+      <div class="preview-box">
+        <span class="preview-label">저장 경로 미리보기</span>
+        <code id="pathPreview" class="preview-path">다운로드/X_Images/user_1850000000000000000_01.jpg</code>
+      </div>
+
+      <div class="actions">
+        <button type="submit" class="btn btn-primary" id="saveBtn">설정 저장</button>
+        <button type="button" class="btn btn-secondary" id="openFolderBtn">폴더 열기</button>
+      </div>
+
+      <div id="statusMsg" class="status" role="status" aria-live="polite"></div>
+    </form>
+
+    <footer class="footer">
+      <span>누적 다운로드: <strong id="downloadCount">0</strong>장</span>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

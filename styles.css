@@ -1,0 +1,78 @@
+.x-img-dl-btn-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+}
+
+.x-img-dl-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 34px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 9999px;
+  background: transparent;
+  color: rgb(113, 118, 123);
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.x-img-dl-btn:hover {
+  background-color: rgba(29, 155, 240, 0.1);
+  color: rgb(29, 155, 240);
+}
+
+.x-img-dl-btn:active {
+  background-color: rgba(29, 155, 240, 0.2);
+}
+
+.x-img-dl-btn[data-state="loading"] {
+  color: rgb(29, 155, 240);
+  cursor: wait;
+}
+
+.x-img-dl-btn[data-state="done"] {
+  color: rgb(0, 186, 124);
+  background-color: rgba(0, 186, 124, 0.1);
+}
+
+.x-img-dl-btn[data-state="error"] {
+  color: rgb(244, 33, 46);
+  background-color: rgba(244, 33, 46, 0.1);
+}
+
+.x-img-dl-icon-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+}
+
+.x-img-dl-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+.x-img-dl-count:empty {
+  display: none;
+}
+
+.x-img-dl-spin {
+  animation: x-img-dl-rotate 0.9s linear infinite;
+}
+
+@keyframes x-img-dl-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
