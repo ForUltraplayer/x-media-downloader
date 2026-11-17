@@ -1,6 +1,6 @@
 # X(Twitter) 원본 이미지 다운로더
 
-`x.com` / `twitter.com` 트윗의 모든 이미지를 버튼 한 번으로 **원본 화질(`name=orig`)**로 지정한 폴더에 일괄 다운로드하는 Chrome/Edge 확장프로그램입니다.
+`x.com` / `twitter.com` 트윗의 모든 이미지를 버튼 한 번으로 원본 화질로 지정한 폴더에 일괄 다운로드하는 Chrome/Edge 확장프로그램
 
 ## 주요 기능
 
