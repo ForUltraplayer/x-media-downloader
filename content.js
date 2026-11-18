@@ -5,8 +5,88 @@
   const BTN_CLASS = 'x-img-dl-btn';
   const EVENT_NAME = '__x_media_dl_data__';
 
+  const DEFAULT_PRESETS = [
+    { id: 'preset_default', name: 'X_Images', folderPath: 'X_Images' }
+  ];
+
+  let userSettings = {
+    presets: DEFAULT_PRESETS,
+    activePresetId: 'preset_default',
+    clickMode: 'instant_hover',
+    rememberPreset: false,
+    folderPath: 'X_Images'
+  };
+
   // tweetId -> [{ type: 'gif' | 'video', url, mediaId }]
   const tweetVideoCache = new Map();
+
+  function normalizePresets(stored) {
+    if (Array.isArray(stored.presets) && stored.presets.length > 0) {
+      return stored.presets.map((p, idx) => {
+        const folderPath = String(p.folderPath || '').trim();
+        return {
+          id: String(p.id || `preset_${idx + 1}`),
+          name: folderPath || '다운로드(기본)',
+          folderPath
+        };
+      });
+    }
+    const legacy = String(stored.folderPath ?? 'X_Images').trim();
+    return [{ id: 'preset_default', name: legacy || '다운로드(기본)', folderPath: legacy }];
+  }
+
+  function applySettings(stored) {
+    const presets = normalizePresets(stored);
+    const activePresetId = presets.some((p) => p.id === stored.activePresetId)
+      ? stored.activePresetId
+      : presets[0].id;
+    userSettings = {
+      presets,
+      activePresetId,
+      clickMode: stored.clickMode === 'always_menu' ? 'always_menu' : 'instant_hover',
+      rememberPreset: Boolean(stored.rememberPreset),
+      folderPath: stored.folderPath ?? 'X_Images'
+    };
+  }
+
+  function getActivePreset() {
+    return (
+      userSettings.presets.find((p) => p.id === userSettings.activePresetId) ||
+      userSettings.presets[0]
+    );
+  }
+
+  async function loadInitialSettings() {
+    try {
+      const stored = await chrome.storage.sync.get({
+        presets: DEFAULT_PRESETS,
+        activePresetId: 'preset_default',
+        clickMode: 'instant_hover',
+        rememberPreset: false,
+        folderPath: 'X_Images'
+      });
+      applySettings(stored);
+      refreshButtonTooltips();
+    } catch {
+      // Ignore if storage unavailable
+    }
+  }
+
+  try {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'sync') return;
+      const merged = { ...userSettings };
+      if (changes.presets) merged.presets = changes.presets.newValue;
+      if (changes.activePresetId) merged.activePresetId = changes.activePresetId.newValue;
+      if (changes.clickMode) merged.clickMode = changes.clickMode.newValue;
+      if (changes.rememberPreset) merged.rememberPreset = changes.rememberPreset.newValue;
+      if (changes.folderPath) merged.folderPath = changes.folderPath.newValue;
+      applySettings(merged);
+      refreshButtonTooltips();
+    });
+  } catch {
+    // Ignore if runtime unavailable
+  }
 
   window.addEventListener(EVENT_NAME, (e) => {
     const map = e?.detail;
@@ -137,7 +217,6 @@
       );
       for (const el of videoContainers) {
         if (!isInsideQuoteTweet(el, article)) {
-          // tweetPhoto without a pbs.twimg.com/media image means video/GIF
           if (el.getAttribute('data-testid') === 'tweetPhoto' && el.querySelector('img[src*="pbs.twimg.com/media/"]')) {
             continue;
           }
@@ -252,6 +331,296 @@
     }
   }
 
+  function buildIdleTooltip(count) {
+    const active = getActivePreset();
+    const presetName = active ? active.name : '기본';
+    if (userSettings.clickMode === 'always_menu' && userSettings.presets.length > 1) {
+      return `원본 미디어 다운로드 (${count}개) · 클릭해 폴더 선택`;
+    }
+    if (userSettings.presets.length > 1) {
+      return `원본 미디어 다운로드 (${count}개) · 클릭: [${presetName}] / 호버·우클릭: 폴더 변경`;
+    }
+    return `원본 미디어 다운로드 (${count}개) · [${presetName}]`;
+  }
+
+  function refreshButtonTooltips() {
+    const buttons = document.querySelectorAll(`.${BTN_CLASS}`);
+    for (const btn of buttons) {
+      if (btn.dataset.state === 'idle') {
+        const count = Number(btn.dataset.mediaCount || 1);
+        btn.title = buildIdleTooltip(count);
+      }
+    }
+  }
+
+  async function triggerDownload(article, btn, preset) {
+    if (btn.dataset.state === 'loading') return;
+
+    const { username, tweetId } = extractTweetMeta(article);
+    let { images, videoItems, hasUnresolvedVideo } = getMediaSummary(article);
+
+    setButtonState(btn, 'loading', '...');
+
+    try {
+      if (!chrome?.runtime?.id || typeof chrome.runtime.sendMessage !== 'function') {
+        setButtonState(btn, 'error', '↻');
+        btn.title = '확장프로그램이 업데이트되었습니다. 이 X.com 페이지를 새로고침(F5) 해주세요.';
+        setTimeout(() => {
+          setButtonState(btn, 'idle', '');
+        }, 3000);
+        return;
+      }
+
+      if (videoItems.length === 0 && hasUnresolvedVideo) {
+        const fallback = await chrome.runtime.sendMessage({
+          type: 'FETCH_SYNDICATION_MEDIA',
+          tweetId
+        });
+        if (fallback?.ok && Array.isArray(fallback.items) && fallback.items.length > 0) {
+          videoItems = fallback.items;
+          tweetVideoCache.set(tweetId, videoItems);
+        }
+      }
+
+      const allItems = [...images, ...videoItems];
+      if (allItems.length === 0) {
+        setButtonState(btn, 'error', '0');
+        btn.title = '미디어 주소를 찾을 수 없습니다 (페이지를 새로고침 후 다시 시도해보세요)';
+        setTimeout(() => setButtonState(btn, 'idle', ''), 2500);
+        return;
+      }
+
+      const hasGif = videoItems.some((v) => v.type === 'gif');
+      setButtonState(btn, 'loading', hasGif ? 'GIF' : String(allItems.length));
+
+      const chosenPreset = preset || getActivePreset();
+      const folderPath = chosenPreset ? chosenPreset.folderPath : userSettings.folderPath;
+
+      const res = await chrome.runtime.sendMessage({
+        type: 'DOWNLOAD_MEDIA',
+        items: allItems,
+        folderPath,
+        username,
+        tweetId
+      });
+
+      if (res && res.ok) {
+        setButtonState(btn, 'done', `${res.started}/${res.total}`);
+        btn.title = `[${chosenPreset?.name || '기본'}] 저장 완료 (${res.started}개)`;
+        setTimeout(() => {
+          btn.dataset.mediaCount = String(allItems.length);
+          setButtonState(btn, 'idle', allItems.length > 1 ? String(allItems.length) : '');
+          btn.title = buildIdleTooltip(allItems.length);
+        }, 2200);
+      } else {
+        setButtonState(btn, 'error', '!');
+        btn.title = res?.error || '다운로드 실패';
+        setTimeout(() => {
+          setButtonState(btn, 'idle', allItems.length > 1 ? String(allItems.length) : '');
+          btn.title = buildIdleTooltip(allItems.length);
+        }, 2500);
+      }
+    } catch (err) {
+      console.warn('[X-MEDIA-DL] sendMessage failed:', err);
+      setButtonState(btn, 'error', '↻');
+      btn.title = '확장프로그램 연결이 끊겼습니다. 페이지를 새로고침(F5) 해주세요.';
+      setTimeout(() => {
+        setButtonState(btn, 'idle', '');
+      }, 3000);
+    }
+  }
+
+  // Shared floating preset popover
+  let popoverEl = null;
+  let popoverAnchorBtn = null;
+  let popoverAnchorArticle = null;
+  let popoverAnchorTop = 0;
+  let popoverPinned = false;
+  let openTimer = null;
+  let closeTimer = null;
+
+  function clearPopoverTimers() {
+    if (openTimer) {
+      clearTimeout(openTimer);
+      openTimer = null;
+    }
+    if (closeTimer) {
+      clearTimeout(closeTimer);
+      closeTimer = null;
+    }
+  }
+
+  function ensurePopover() {
+    if (popoverEl && popoverEl.isConnected) return popoverEl;
+
+    popoverEl = document.createElement('div');
+    popoverEl.className = 'x-img-dl-popover';
+    popoverEl.setAttribute('role', 'menu');
+
+    const title = document.createElement('div');
+    title.className = 'x-img-dl-popover-title';
+    title.textContent = '저장 폴더 선택';
+
+    const list = document.createElement('div');
+    list.className = 'x-img-dl-popover-list';
+
+    popoverEl.appendChild(title);
+    popoverEl.appendChild(list);
+
+    popoverEl.addEventListener('mouseenter', () => {
+      if (closeTimer) {
+        clearTimeout(closeTimer);
+        closeTimer = null;
+      }
+    });
+
+    popoverEl.addEventListener('mouseleave', () => {
+      if (!popoverPinned) {
+        scheduleClosePopover(160);
+      }
+    });
+
+    document.body.appendChild(popoverEl);
+    return popoverEl;
+  }
+
+  function closePopover() {
+    clearPopoverTimers();
+    if (popoverEl) {
+      popoverEl.classList.remove('is-open');
+    }
+    popoverAnchorBtn = null;
+    popoverAnchorArticle = null;
+    popoverPinned = false;
+  }
+
+  function scheduleClosePopover(delay = 180) {
+    if (closeTimer) clearTimeout(closeTimer);
+    closeTimer = setTimeout(() => {
+      closePopover();
+    }, delay);
+  }
+
+  function openPopover(article, btn, pinned) {
+    clearPopoverTimers();
+    const pop = ensurePopover();
+    const titleEl = pop.querySelector('.x-img-dl-popover-title');
+    if (titleEl) {
+      titleEl.textContent =
+        userSettings.presets.length <= 1
+          ? '저장 폴더 선택 (팝업에서 +추가 가능)'
+          : '저장 폴더 선택';
+    }
+    const list = pop.querySelector('.x-img-dl-popover-list');
+    list.innerHTML = '';
+
+    popoverAnchorBtn = btn;
+    popoverAnchorArticle = article;
+    popoverAnchorTop = btn.getBoundingClientRect().top;
+    popoverPinned = pinned;
+
+    userSettings.presets.forEach((preset) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'x-img-dl-preset-item';
+      if (preset.id === userSettings.activePresetId) {
+        item.classList.add('is-active');
+      }
+
+      const main = document.createElement('span');
+      main.className = 'x-img-dl-preset-main';
+
+      const dot = document.createElement('span');
+      dot.className = 'x-img-dl-preset-dot';
+
+      const name = document.createElement('span');
+      name.className = 'x-img-dl-preset-name';
+      name.textContent = preset.folderPath || '다운로드(기본)';
+
+      main.appendChild(dot);
+      main.appendChild(name);
+
+      item.appendChild(main);
+
+      item.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const targetArticle = popoverAnchorArticle;
+        const targetBtn = popoverAnchorBtn;
+        closePopover();
+
+        if (userSettings.rememberPreset && preset.id !== userSettings.activePresetId) {
+          userSettings.activePresetId = preset.id;
+          userSettings.folderPath = preset.folderPath;
+          refreshButtonTooltips();
+          try {
+            await chrome.storage.sync.set({
+              activePresetId: preset.id,
+              folderPath: preset.folderPath
+            });
+          } catch {
+            // Ignore storage write error
+          }
+        }
+
+        if (targetArticle && targetBtn) {
+          triggerDownload(targetArticle, targetBtn, preset);
+        }
+      });
+
+      list.appendChild(item);
+    });
+
+    pop.style.visibility = 'hidden';
+    pop.classList.add('is-open');
+
+    const btnRect = btn.getBoundingClientRect();
+    const popRect = pop.getBoundingClientRect();
+    const margin = 8;
+
+    let left = btnRect.left + btnRect.width / 2 - popRect.width / 2;
+    left = Math.max(margin, Math.min(left, window.innerWidth - popRect.width - margin));
+
+    let top = btnRect.top - popRect.height - 6;
+    if (top < margin) {
+      top = Math.min(btnRect.bottom + 6, window.innerHeight - popRect.height - margin);
+    }
+
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+    pop.style.visibility = 'visible';
+  }
+
+  document.addEventListener('pointerdown', (e) => {
+    if (!popoverEl || !popoverEl.classList.contains('is-open')) return;
+    if (e.target instanceof Node) {
+      if (popoverEl.contains(e.target)) return;
+      if (popoverAnchorBtn && popoverAnchorBtn.contains(e.target)) return;
+    }
+    closePopover();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closePopover();
+    }
+  });
+
+  window.addEventListener(
+    'scroll',
+    (e) => {
+      if (!popoverEl || !popoverEl.classList.contains('is-open')) return;
+      if (e.target instanceof Node && popoverEl.contains(e.target)) return;
+      if (popoverAnchorBtn && popoverAnchorBtn.isConnected) {
+        const currentTop = popoverAnchorBtn.getBoundingClientRect().top;
+        if (Math.abs(currentTop - popoverAnchorTop) <= 10) return;
+      }
+      closePopover();
+    },
+    { passive: true, capture: true }
+  );
+
   function createDownloadButton(article, initialCount) {
     const wrap = document.createElement('div');
     wrap.className = BTN_WRAP_CLASS;
@@ -259,7 +628,8 @@
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = BTN_CLASS;
-    btn.title = `원본 미디어 다운로드 (${initialCount}개)`;
+    btn.dataset.mediaCount = String(initialCount);
+    btn.title = buildIdleTooltip(initialCount);
     btn.setAttribute('aria-label', '원본 미디어 다운로드');
     btn.dataset.state = 'idle';
 
@@ -274,70 +644,59 @@
     btn.appendChild(iconBox);
     btn.appendChild(countSpan);
 
-    btn.addEventListener('click', async (e) => {
+    btn.addEventListener('mouseenter', () => {
+      if (btn.dataset.state === 'loading') return;
+      if (userSettings.clickMode !== 'instant_hover') return;
+      if (popoverAnchorBtn === btn && popoverEl?.classList.contains('is-open')) {
+        if (closeTimer) {
+          clearTimeout(closeTimer);
+          closeTimer = null;
+        }
+        return;
+      }
+      clearPopoverTimers();
+      openTimer = setTimeout(() => {
+        openPopover(article, btn, false);
+      }, 150);
+    });
+
+    btn.addEventListener('mouseleave', () => {
+      if (openTimer) {
+        clearTimeout(openTimer);
+        openTimer = null;
+      }
+      if (!popoverPinned && popoverAnchorBtn === btn) {
+        scheduleClosePopover(220);
+      }
+    });
+
+    const handleContextMenu = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      e.stopImmediatePropagation();
+      if (btn.dataset.state === 'loading') return;
+      openPopover(article, btn, true);
+    };
 
+    btn.addEventListener('contextmenu', handleContextMenu, { capture: true });
+    wrap.addEventListener('contextmenu', handleContextMenu, { capture: true });
+
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       if (btn.dataset.state === 'loading') return;
 
-      const { username, tweetId } = extractTweetMeta(article);
-      let { images, videoItems, hasUnresolvedVideo } = getMediaSummary(article);
-
-      setButtonState(btn, 'loading', '...');
-
-      try {
-        if (videoItems.length === 0 && hasUnresolvedVideo) {
-          const fallback = await chrome.runtime.sendMessage({
-            type: 'FETCH_SYNDICATION_MEDIA',
-            tweetId
-          });
-          if (fallback?.ok && Array.isArray(fallback.items) && fallback.items.length > 0) {
-            videoItems = fallback.items;
-            tweetVideoCache.set(tweetId, videoItems);
-          }
-        }
-
-        const allItems = [...images, ...videoItems];
-        if (allItems.length === 0) {
-          setButtonState(btn, 'error', '0');
-          btn.title = '미디어 주소를 찾을 수 없습니다 (페이지를 새로고침 후 다시 시도해보세요)';
-          setTimeout(() => setButtonState(btn, 'idle', ''), 2500);
-          return;
-        }
-
-        const hasGif = videoItems.some((v) => v.type === 'gif');
-        setButtonState(btn, 'loading', hasGif ? 'GIF' : String(allItems.length));
-
-        const res = await chrome.runtime.sendMessage({
-          type: 'DOWNLOAD_MEDIA',
-          items: allItems,
-          username,
-          tweetId
-        });
-
-        if (res && res.ok) {
-          setButtonState(btn, 'done', `${res.started}/${res.total}`);
-          btn.title = `다운로드 완료 (${res.started}개)`;
-          setTimeout(() => {
-            setButtonState(btn, 'idle', allItems.length > 1 ? String(allItems.length) : '');
-            btn.title = `원본 미디어 다운로드 (${allItems.length}개)`;
-          }, 2500);
+      if (userSettings.clickMode === 'always_menu' && userSettings.presets.length > 1) {
+        if (popoverAnchorBtn === btn && popoverEl?.classList.contains('is-open')) {
+          closePopover();
         } else {
-          setButtonState(btn, 'error', '!');
-          btn.title = res?.error || '다운로드 실패';
-          setTimeout(() => {
-            setButtonState(btn, 'idle', allItems.length > 1 ? String(allItems.length) : '');
-            btn.title = `원본 미디어 다운로드 (${allItems.length}개)`;
-          }, 2500);
+          openPopover(article, btn, true);
         }
-      } catch (err) {
-        console.error('[X-MEDIA-DL] sendMessage failed:', err);
-        setButtonState(btn, 'error', '!');
-        btn.title = '확장프로그램 연결 오류 (페이지를 새로고침 해주세요)';
-        setTimeout(() => {
-          setButtonState(btn, 'idle', '');
-        }, 3000);
+        return;
       }
+
+      closePopover();
+      triggerDownload(article, btn, getActivePreset());
     });
 
     wrap.appendChild(btn);
@@ -356,11 +715,12 @@
     if (existing) {
       const btn = existing.querySelector(`.${BTN_CLASS}`);
       if (btn && btn.dataset.state === 'idle') {
+        btn.dataset.mediaCount = String(totalCount);
         const countEl = btn.querySelector('.x-img-dl-count');
         if (countEl) {
           countEl.textContent = totalCount > 1 ? String(totalCount) : '';
         }
-        btn.title = `원본 미디어 다운로드 (${totalCount}개)`;
+        btn.title = buildIdleTooltip(totalCount);
       }
       return;
     }
@@ -421,6 +781,7 @@
     }
   });
 
+  loadInitialSettings();
   scanAllTweets();
   observer.observe(document.body, { childList: true, subtree: true });
   setInterval(() => scanAllTweets(), 1500);

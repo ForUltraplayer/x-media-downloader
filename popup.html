@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>X 원본 이미지 다운로더</title>
+  <title>X 원본 미디어 다운로더</title>
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
@@ -16,18 +16,44 @@
     </header>
 
     <form id="settings-form" class="form">
-      <div class="field">
-        <label for="folderPath">하위 폴더 이름 (다운로드 폴더 기준)</label>
+      <div class="field base-folder-field">
+        <label class="checkbox-label">
+          <input type="checkbox" id="useBaseFolder" name="useBaseFolder" />
+          <span>공통 상위 폴더 안에 프리셋 저장</span>
+        </label>
         <input
           type="text"
-          id="folderPath"
-          name="folderPath"
-          placeholder="예: X_Images 또는 일러스트/트위터"
+          id="baseFolderPath"
+          name="baseFolderPath"
+          placeholder="상위 폴더명 또는 경로 (예: X_Images, 그림/트위터)"
           autocomplete="off"
         />
+      </div>
+
+      <div class="field">
+        <div class="field-head">
+          <label>저장 폴더 프리셋 (기본 선택: 좌클릭 저장 폴더)</label>
+          <button type="button" class="btn-link" id="addPresetBtn">+ 추가</button>
+        </div>
+        <div id="presetList" class="preset-list"></div>
         <p class="hint">
-          다운로드 폴더 안에 생성할 하위 폴더명. 비워두면 다운로드 폴더에 바로 저장됨
+          다운로드 폴더 안에 만들 폴더명입니다. 이미 있는 폴더면 그 안에 바로 저장됩니다. (비워두면 다운로드 폴더에 직접 저장)
         </p>
+      </div>
+
+      <div class="field">
+        <label for="clickMode">트윗 버튼 동작 방식</label>
+        <select id="clickMode" name="clickMode">
+          <option value="instant_hover">좌클릭 즉시 저장 + 호버/우클릭으로 프리셋 선택</option>
+          <option value="always_menu">좌클릭할 때마다 버튼 위에 프리셋 메뉴 열기</option>
+        </select>
+      </div>
+
+      <div class="field checkbox-field">
+        <label class="checkbox-label">
+          <input type="checkbox" id="rememberPreset" name="rememberPreset" />
+          <span>메뉴에서 고른 프리셋을 기본값으로 기억</span>
+        </label>
       </div>
 
       <div class="field checkbox-field">
@@ -54,7 +80,7 @@
       </div>
 
       <div class="preview-box">
-        <span class="preview-label">저장 경로 미리보기</span>
+        <span class="preview-label">기본 프리셋 저장 경로 미리보기</span>
         <code id="pathPreview" class="preview-path">다운로드/X_Images/user_1850000000000000000_01.jpg</code>
       </div>
 

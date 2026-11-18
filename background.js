@@ -1,5 +1,15 @@
+const DEFAULT_PRESETS = [
+  { id: 'preset_default', name: 'X_Images', folderPath: 'X_Images' }
+];
+
 const DEFAULT_SETTINGS = {
   folderPath: 'X_Images',
+  presets: DEFAULT_PRESETS,
+  activePresetId: 'preset_default',
+  useBaseFolder: false,
+  baseFolderPath: 'X_Images',
+  clickMode: 'instant_hover',
+  rememberPreset: false,
   subfolderByUser: false,
   filenamePattern: 'user_id_index',
   convertGif: true,
@@ -25,7 +35,36 @@ function sanitizeFolderPath(rawPath) {
     .join('/');
 }
 
-function buildFilename({ settings, username, tweetId, mediaId, ext, index, total }) {
+function normalizePresets(stored) {
+  if (Array.isArray(stored.presets) && stored.presets.length > 0) {
+    return stored.presets.map((p, idx) => {
+      const folderPath = sanitizeFolderPath(p.folderPath);
+      return {
+        id: String(p.id || `preset_${idx + 1}`),
+        name: folderPath || '다운로드(기본)',
+        folderPath
+      };
+    });
+  }
+  const legacyFolder = sanitizeFolderPath(stored.folderPath ?? DEFAULT_SETTINGS.folderPath);
+  return [
+    {
+      id: 'preset_default',
+      name: legacyFolder || '다운로드(기본)',
+      folderPath: legacyFolder
+    }
+  ];
+}
+
+function resolveActiveFolderPath(settings, overrideFolderPath) {
+  if (typeof overrideFolderPath === 'string') {
+    return sanitizeFolderPath(overrideFolderPath);
+  }
+  const active = settings.presets.find((p) => p.id === settings.activePresetId) || settings.presets[0];
+  return sanitizeFolderPath(active ? active.folderPath : settings.folderPath);
+}
+
+function buildFilename({ settings, folderPath, username, tweetId, mediaId, ext, index, total }) {
   const safeUser = sanitizeSegment(username) || 'unknown';
   const safeTweetId = sanitizeSegment(tweetId) || 'tweet';
   const safeMediaId = sanitizeSegment(mediaId) || `media_${index + 1}`;
@@ -48,9 +87,15 @@ function buildFilename({ settings, username, tweetId, mediaId, ext, index, total
   }
 
   const parts = [];
-  const baseFolder = sanitizeFolderPath(settings.folderPath);
-  if (baseFolder) {
-    parts.push(baseFolder);
+  if (settings.useBaseFolder) {
+    const rootFolder = sanitizeFolderPath(settings.baseFolderPath);
+    if (rootFolder) {
+      parts.push(rootFolder);
+    }
+  }
+  const presetFolder = sanitizeFolderPath(folderPath);
+  if (presetFolder) {
+    parts.push(presetFolder);
   }
   if (settings.subfolderByUser) {
     parts.push(safeUser);
@@ -62,7 +107,17 @@ function buildFilename({ settings, username, tweetId, mediaId, ext, index, total
 
 async function getSettings() {
   const stored = await chrome.storage.sync.get(DEFAULT_SETTINGS);
-  return { ...DEFAULT_SETTINGS, ...stored };
+  const presets = normalizePresets(stored);
+  const activePresetId = presets.some((p) => p.id === stored.activePresetId)
+    ? stored.activePresetId
+    : presets[0].id;
+
+  return {
+    ...DEFAULT_SETTINGS,
+    ...stored,
+    presets,
+    activePresetId
+  };
 }
 
 async function ensureOffscreenDocument() {
@@ -136,7 +191,7 @@ async function fetchSyndicationMedia(tweetId) {
   return items;
 }
 
-async function downloadItems(items, settings, username, tweetId) {
+async function downloadItems(items, settings, folderPath, username, tweetId) {
   let started = 0;
   let failed = 0;
   let cursor = 0;
@@ -157,6 +212,7 @@ async function downloadItems(items, settings, username, tweetId) {
 
     const filename = buildFilename({
       settings,
+      folderPath,
       username,
       tweetId,
       mediaId: item.mediaId,
@@ -200,8 +256,32 @@ chrome.runtime.onInstalled.addListener(async () => {
   const current = await chrome.storage.sync.get(null);
   if (Object.keys(current).length === 0) {
     await chrome.storage.sync.set(DEFAULT_SETTINGS);
-  } else if (typeof current.convertGif !== 'boolean') {
-    await chrome.storage.sync.set({ convertGif: true });
+    return;
+  }
+
+  const updates = {};
+  if (!Array.isArray(current.presets) || current.presets.length === 0) {
+    const presets = normalizePresets(current);
+    updates.presets = presets;
+    updates.activePresetId = presets[0].id;
+  }
+  if (typeof current.convertGif !== 'boolean') {
+    updates.convertGif = true;
+  }
+  if (!current.clickMode) {
+    updates.clickMode = DEFAULT_SETTINGS.clickMode;
+  }
+  if (typeof current.rememberPreset !== 'boolean') {
+    updates.rememberPreset = DEFAULT_SETTINGS.rememberPreset;
+  }
+  if (typeof current.useBaseFolder !== 'boolean') {
+    updates.useBaseFolder = DEFAULT_SETTINGS.useBaseFolder;
+  }
+  if (typeof current.baseFolderPath !== 'string') {
+    updates.baseFolderPath = DEFAULT_SETTINGS.baseFolderPath;
+  }
+  if (Object.keys(updates).length > 0) {
+    await chrome.storage.sync.set(updates);
   }
 });
 
@@ -221,9 +301,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
 
         const settings = await getSettings();
+        const targetFolderPath = resolveActiveFolderPath(settings, message.folderPath);
         const { started, failed } = await downloadItems(
           rawItems,
           settings,
+          targetFolderPath,
           message.username,
           message.tweetId
         );
