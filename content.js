@@ -17,8 +17,8 @@
     folderPath: 'X_Images'
   };
 
-  // tweetId -> [{ type: 'gif' | 'video', url, mediaId }]
-  const tweetVideoCache = new Map();
+  // tweetId -> [{ type: 'image' | 'gif' | 'video', url, mediaId, ext? }]
+  const tweetMediaCache = new Map();
 
   function normalizePresets(stored) {
     if (Array.isArray(stored.presets) && stored.presets.length > 0) {
@@ -94,7 +94,7 @@
     let updated = false;
     for (const [tweetId, items] of Object.entries(map)) {
       if (Array.isArray(items) && items.length > 0) {
-        tweetVideoCache.set(tweetId, items);
+        tweetMediaCache.set(tweetId, items);
         updated = true;
       }
     }
@@ -257,19 +257,54 @@
     return { username: 'unknown', tweetId: String(Date.now()) };
   }
 
+  function hasMoreImagesBadge(article) {
+    const photos = article.querySelectorAll('[data-testid="tweetPhoto"], a[href*="/photo/"]');
+    for (const el of photos) {
+      if (isInsideQuoteTweet(el, article)) continue;
+      const text = (el.textContent || '').trim();
+      if (/^\+\d+$/.test(text)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function getMediaSummary(article) {
-    const images = extractTweetImages(article);
+    const domImages = extractTweetImages(article);
     const { tweetId } = extractTweetMeta(article);
-    const cachedVideos = tweetVideoCache.get(tweetId) || [];
+    const apiItems = tweetMediaCache.get(tweetId) || [];
     const { domVideos, hasUnresolvedVideo } = extractDomVideos(article);
 
-    const videoItems = cachedVideos.length > 0 ? cachedVideos : domVideos;
-    const totalCount = images.length + (videoItems.length > 0 ? videoItems.length : hasUnresolvedVideo ? 1 : 0);
+    const mergedMap = new Map();
+    for (const item of apiItems) {
+      if (item && item.mediaId && !mergedMap.has(item.mediaId)) {
+        mergedMap.set(item.mediaId, item);
+      }
+    }
+    for (const img of domImages) {
+      if (img && img.mediaId && !mergedMap.has(img.mediaId)) {
+        mergedMap.set(img.mediaId, img);
+      }
+    }
+
+    const hasApiVideo = apiItems.some((item) => item.type === 'video' || item.type === 'gif');
+    if (!hasApiVideo) {
+      for (const vid of domVideos) {
+        if (vid && vid.mediaId && !mergedMap.has(vid.mediaId)) {
+          mergedMap.set(vid.mediaId, vid);
+        }
+      }
+    }
+
+    const allItems = Array.from(mergedMap.values());
+    const hasResolvedVideo = allItems.some((item) => item.type === 'video' || item.type === 'gif');
+    const needsVideoFallback = hasUnresolvedVideo && !hasResolvedVideo;
+    const needsMoreFallback = !tweetMediaCache.has(tweetId) && hasMoreImagesBadge(article);
+    const totalCount = allItems.length + (needsVideoFallback ? 1 : 0);
 
     return {
-      images,
-      videoItems,
-      hasUnresolvedVideo,
+      allItems,
+      needsFallback: needsVideoFallback || needsMoreFallback,
       totalCount
     };
   }
@@ -357,7 +392,7 @@
     if (btn.dataset.state === 'loading') return;
 
     const { username, tweetId } = extractTweetMeta(article);
-    let { images, videoItems, hasUnresolvedVideo } = getMediaSummary(article);
+    let { allItems, needsFallback } = getMediaSummary(article);
 
     setButtonState(btn, 'loading', '...');
 
@@ -371,18 +406,17 @@
         return;
       }
 
-      if (videoItems.length === 0 && hasUnresolvedVideo) {
+      if (needsFallback) {
         const fallback = await chrome.runtime.sendMessage({
           type: 'FETCH_SYNDICATION_MEDIA',
           tweetId
         });
         if (fallback?.ok && Array.isArray(fallback.items) && fallback.items.length > 0) {
-          videoItems = fallback.items;
-          tweetVideoCache.set(tweetId, videoItems);
+          tweetMediaCache.set(tweetId, fallback.items);
+          allItems = getMediaSummary(article).allItems;
         }
       }
 
-      const allItems = [...images, ...videoItems];
       if (allItems.length === 0) {
         setButtonState(btn, 'error', '0');
         btn.title = '미디어 주소를 찾을 수 없습니다 (페이지를 새로고침 후 다시 시도해보세요)';
@@ -390,7 +424,7 @@
         return;
       }
 
-      const hasGif = videoItems.some((v) => v.type === 'gif');
+      const hasGif = allItems.some((v) => v.type === 'gif');
       setButtonState(btn, 'loading', hasGif ? 'GIF' : String(allItems.length));
 
       const chosenPreset = preset || getActivePreset();

@@ -14,6 +14,40 @@
     return mp4s[0]?.url || null;
   }
 
+  function toOriginalPhotoInfo(mediaUrlHttps, fallbackId) {
+    try {
+      const url = new URL(mediaUrlHttps);
+      if (!url.hostname.endsWith('twimg.com') || !url.pathname.includes('/media/')) {
+        return null;
+      }
+
+      const rawSegment = url.pathname.split('/media/')[1]?.split('/')[0] || '';
+      const cleanSegment = rawSegment.split(':')[0];
+      const dotIdx = cleanSegment.lastIndexOf('.');
+
+      let mediaId = cleanSegment;
+      let extFromPath = '';
+      if (dotIdx > 0) {
+        mediaId = cleanSegment.slice(0, dotIdx);
+        extFromPath = cleanSegment.slice(dotIdx + 1).toLowerCase();
+      }
+      if (!mediaId) mediaId = String(fallbackId || '');
+      if (!mediaId) return null;
+
+      let format = (url.searchParams.get('format') || extFromPath || 'jpg').toLowerCase();
+      if (format === 'jpeg') format = 'jpg';
+
+      return {
+        type: 'image',
+        url: `https://pbs.twimg.com/media/${mediaId}?format=${encodeURIComponent(format)}&name=orig`,
+        mediaId,
+        ext: format
+      };
+    } catch {
+      return null;
+    }
+  }
+
   function extractFromTweetObj(tweetObj, outMap) {
     const tweetId = tweetObj?.rest_id || tweetObj?.id_str;
     if (!tweetId) return;
@@ -22,20 +56,48 @@
       tweetObj?.legacy?.extended_entities?.media ||
       tweetObj?.extended_entities?.media;
 
-    if (!Array.isArray(mediaList) || mediaList.length === 0) return;
+    const articleMediaList =
+      tweetObj?.article?.article_results?.result?.media_entities;
 
     const items = [];
-    for (let i = 0; i < mediaList.length; i++) {
-      const m = mediaList[i];
-      if (!m) continue;
-      if (m.type === 'animated_gif' || m.type === 'video') {
-        const mp4Url = pickBestMp4(m.video_info);
-        if (mp4Url) {
-          items.push({
-            type: m.type === 'animated_gif' ? 'gif' : 'video',
-            url: mp4Url,
-            mediaId: m.id_str || `${tweetId}_vid_${i}`
-          });
+    const seenIds = new Set();
+
+    if (Array.isArray(mediaList)) {
+      for (let i = 0; i < mediaList.length; i++) {
+        const m = mediaList[i];
+        if (!m) continue;
+
+        if (m.type === 'photo' && typeof m.media_url_https === 'string') {
+          const info = toOriginalPhotoInfo(m.media_url_https, m.id_str || `${tweetId}_img_${i}`);
+          if (info && !seenIds.has(info.mediaId)) {
+            seenIds.add(info.mediaId);
+            items.push(info);
+          }
+        } else if (m.type === 'animated_gif' || m.type === 'video') {
+          const mp4Url = pickBestMp4(m.video_info);
+          const mediaId = m.id_str || `${tweetId}_vid_${i}`;
+          if (mp4Url && !seenIds.has(mediaId)) {
+            seenIds.add(mediaId);
+            items.push({
+              type: m.type === 'animated_gif' ? 'gif' : 'video',
+              url: mp4Url,
+              mediaId
+            });
+          }
+        }
+      }
+    }
+
+    if (Array.isArray(articleMediaList)) {
+      for (let i = 0; i < articleMediaList.length; i++) {
+        const entry = articleMediaList[i];
+        const origImg = entry?.media_info?.original_img_url;
+        if (typeof origImg === 'string') {
+          const info = toOriginalPhotoInfo(origImg, entry.media_id || `${tweetId}_art_${i}`);
+          if (info && !seenIds.has(info.mediaId)) {
+            seenIds.add(info.mediaId);
+            items.push(info);
+          }
         }
       }
     }
@@ -57,7 +119,12 @@
       return;
     }
 
-    if ((node.rest_id || node.id_str) && (node.legacy?.extended_entities?.media || node.extended_entities?.media)) {
+    if (
+      (node.rest_id || node.id_str) &&
+      (node.legacy?.extended_entities?.media ||
+        node.extended_entities?.media ||
+        node.article?.article_results?.result?.media_entities)
+    ) {
       extractFromTweetObj(node, outMap);
     }
 

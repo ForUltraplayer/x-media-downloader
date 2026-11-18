@@ -174,7 +174,25 @@ async function fetchSyndicationMedia(tweetId) {
   for (let i = 0; i < details.length; i++) {
     const m = details[i];
     if (!m) continue;
-    if (m.type === 'animated_gif' || m.type === 'video') {
+    if (m.type === 'photo' && typeof m.media_url_https === 'string') {
+      try {
+        const u = new URL(m.media_url_https);
+        const rawSegment = u.pathname.split('/media/')[1]?.split('/')[0] || '';
+        const cleanSegment = rawSegment.split(':')[0];
+        const dotIdx = cleanSegment.lastIndexOf('.');
+        const mediaId = dotIdx > 0 ? cleanSegment.slice(0, dotIdx) : cleanSegment || m.id_str || `${tweetId}_img_${i}`;
+        let format = dotIdx > 0 ? cleanSegment.slice(dotIdx + 1).toLowerCase() : 'jpg';
+        if (format === 'jpeg') format = 'jpg';
+        items.push({
+          type: 'image',
+          url: `https://pbs.twimg.com/media/${mediaId}?format=${encodeURIComponent(format)}&name=orig`,
+          mediaId,
+          ext: format
+        });
+      } catch {
+        // Ignore malformed URL
+      }
+    } else if (m.type === 'animated_gif' || m.type === 'video') {
       const variants = Array.isArray(m.video_info?.variants) ? m.video_info.variants : [];
       const best = variants
         .filter((v) => v && v.content_type === 'video/mp4' && typeof v.url === 'string')
