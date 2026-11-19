@@ -5,47 +5,28 @@
   const BTN_CLASS = 'x-img-dl-btn';
   const EVENT_NAME = '__x_media_dl_data__';
 
-  const DEFAULT_PRESETS = [
-    { id: 'preset_default', name: 'X_Images', folderPath: 'X_Images' }
-  ];
+  // Loaded before this file via manifest content_scripts (same isolated world).
+  const { DEFAULT_SETTINGS, normalizePresets, pickActivePresetId } = XMediaSettings;
 
   let userSettings = {
-    presets: DEFAULT_PRESETS,
-    activePresetId: 'preset_default',
-    clickMode: 'instant_hover',
-    rememberPreset: false,
-    folderPath: 'X_Images'
+    presets: DEFAULT_SETTINGS.presets,
+    activePresetId: DEFAULT_SETTINGS.activePresetId,
+    clickMode: DEFAULT_SETTINGS.clickMode,
+    rememberPreset: DEFAULT_SETTINGS.rememberPreset,
+    folderPath: DEFAULT_SETTINGS.folderPath
   };
 
   // tweetId -> [{ type: 'image' | 'gif' | 'video', url, mediaId, ext? }]
   const tweetMediaCache = new Map();
 
-  function normalizePresets(stored) {
-    if (Array.isArray(stored.presets) && stored.presets.length > 0) {
-      return stored.presets.map((p, idx) => {
-        const folderPath = String(p.folderPath || '').trim();
-        return {
-          id: String(p.id || `preset_${idx + 1}`),
-          name: folderPath || '다운로드(기본)',
-          folderPath
-        };
-      });
-    }
-    const legacy = String(stored.folderPath ?? 'X_Images').trim();
-    return [{ id: 'preset_default', name: legacy || '다운로드(기본)', folderPath: legacy }];
-  }
-
   function applySettings(stored) {
     const presets = normalizePresets(stored);
-    const activePresetId = presets.some((p) => p.id === stored.activePresetId)
-      ? stored.activePresetId
-      : presets[0].id;
     userSettings = {
       presets,
-      activePresetId,
+      activePresetId: pickActivePresetId(presets, stored.activePresetId),
       clickMode: stored.clickMode === 'always_menu' ? 'always_menu' : 'instant_hover',
       rememberPreset: Boolean(stored.rememberPreset),
-      folderPath: stored.folderPath ?? 'X_Images'
+      folderPath: stored.folderPath ?? DEFAULT_SETTINGS.folderPath
     };
   }
 
@@ -58,13 +39,7 @@
 
   async function loadInitialSettings() {
     try {
-      const stored = await chrome.storage.sync.get({
-        presets: DEFAULT_PRESETS,
-        activePresetId: 'preset_default',
-        clickMode: 'instant_hover',
-        rememberPreset: false,
-        folderPath: 'X_Images'
-      });
+      const stored = await chrome.storage.sync.get(DEFAULT_SETTINGS);
       applySettings(stored);
       refreshButtonTooltips();
     } catch {
@@ -92,9 +67,14 @@
     const map = e?.detail;
     if (!map || typeof map !== 'object') return;
     let updated = false;
+    // Any script on the page can dispatch this event. Drop malformed entries so the
+    // DOM code below cannot throw; URL/host checks happen in background.js before download.
     for (const [tweetId, items] of Object.entries(map)) {
-      if (Array.isArray(items) && items.length > 0) {
-        tweetMediaCache.set(tweetId, items);
+      const wellFormed = Array.isArray(items)
+        ? items.filter((item) => item && typeof item.url === 'string')
+        : [];
+      if (wellFormed.length > 0) {
+        tweetMediaCache.set(tweetId, wellFormed);
         updated = true;
       }
     }

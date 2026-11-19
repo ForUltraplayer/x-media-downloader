@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
   "name": "X(Twitter) 원본 미디어 다운로더",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "X.com 트윗의 이미지(원본), GIF(.gif 변환), 동영상(최고화질 .mp4)을 버튼 한 번으로 지정한 폴더에 다운로드합니다.",
+  "minimum_chrome_version": "116",
   "permissions": [
     "downloads",
     "storage",
@@ -36,6 +37,7 @@
         "https://twitter.com/*"
       ],
       "js": [
+        "settings_common.js",
         "content.js"
       ],
       "css": [

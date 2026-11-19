@@ -1,59 +1,43 @@
-const DEFAULT_PRESETS = [
-  { id: 'preset_default', name: 'X_Images', folderPath: 'X_Images' }
-];
+importScripts('settings_common.js');
 
-const DEFAULT_SETTINGS = {
-  folderPath: 'X_Images',
-  presets: DEFAULT_PRESETS,
-  activePresetId: 'preset_default',
-  useBaseFolder: false,
-  baseFolderPath: 'X_Images',
-  clickMode: 'instant_hover',
-  rememberPreset: false,
-  subfolderByUser: false,
-  filenamePattern: 'user_id_index',
-  convertGif: true,
-  downloadCount: 0
-};
+const { DEFAULT_SETTINGS, sanitizeSegment, sanitizeFolderPath, normalizePresets, pickActivePresetId } =
+  XMediaSettings;
 
-let creatingOffscreen = null;
+const OFFSCREEN_PATH = 'offscreen.html';
+const MAX_ITEMS_PER_REQUEST = 100;
+const IMAGE_EXTS = new Set(['jpg', 'png', 'webp', 'gif']);
+const MEDIA_ID_PATTERN = /^[\w-]{1,64}$/;
+const TWEET_ID_PATTERN = /^\d{1,25}$/;
 
-function sanitizeSegment(segment) {
-  return String(segment || '')
-    .replace(/[<>:"|?*\x00-\x1F]/g, '_')
-    .replace(/^\.+|\.+$/g, '')
-    .trim();
-}
+let offscreenQueue = Promise.resolve();
+let activeConversions = 0;
+let downloadCountQueue = Promise.resolve();
 
-function sanitizeFolderPath(rawPath) {
-  if (!rawPath) return '';
-  return String(rawPath)
-    .replace(/\\/g, '/')
-    .split('/')
-    .map(sanitizeSegment)
-    .filter((seg) => seg && seg !== '.' && seg !== '..')
-    .join('/');
-}
-
-function normalizePresets(stored) {
-  if (Array.isArray(stored.presets) && stored.presets.length > 0) {
-    return stored.presets.map((p, idx) => {
-      const folderPath = sanitizeFolderPath(p.folderPath);
-      return {
-        id: String(p.id || `preset_${idx + 1}`),
-        name: folderPath || '다운로드(기본)',
-        folderPath
-      };
-    });
+// Items come from content.js, whose cache any script on x.com can fill through the
+// page_hook CustomEvent. This is the single place they are checked before download/fetch.
+function toSafeItem(item) {
+  if (!item || typeof item.url !== 'string') return null;
+  let url;
+  try {
+    url = new URL(item.url);
+  } catch {
+    return null;
   }
-  const legacyFolder = sanitizeFolderPath(stored.folderPath ?? DEFAULT_SETTINGS.folderPath);
-  return [
-    {
-      id: 'preset_default',
-      name: legacyFolder || '다운로드(기본)',
-      folderPath: legacyFolder
-    }
-  ];
+  if (url.protocol !== 'https:') return null;
+  const mediaId =
+    typeof item.mediaId === 'string' && MEDIA_ID_PATTERN.test(item.mediaId) ? item.mediaId : undefined;
+
+  if (item.type === 'image') {
+    if (url.hostname !== 'pbs.twimg.com' || !url.pathname.startsWith('/media/')) return null;
+    const format = (url.searchParams.get('format') || '').toLowerCase().replace(/^jpeg$/, 'jpg');
+    if (!IMAGE_EXTS.has(format)) return null;
+    return { type: 'image', url: url.href, mediaId, ext: format };
+  }
+  if (item.type === 'gif' || item.type === 'video') {
+    if (url.hostname !== 'video.twimg.com' || !url.pathname.endsWith('.mp4')) return null;
+    return { type: item.type, url: url.href, mediaId };
+  }
+  return null;
 }
 
 function resolveActiveFolderPath(settings, overrideFolderPath) {
@@ -108,56 +92,67 @@ function buildFilename({ settings, folderPath, username, tweetId, mediaId, ext, 
 async function getSettings() {
   const stored = await chrome.storage.sync.get(DEFAULT_SETTINGS);
   const presets = normalizePresets(stored);
-  const activePresetId = presets.some((p) => p.id === stored.activePresetId)
-    ? stored.activePresetId
-    : presets[0].id;
 
   return {
     ...DEFAULT_SETTINGS,
     ...stored,
     presets,
-    activePresetId
+    activePresetId: pickActivePresetId(presets, stored.activePresetId)
   };
 }
 
-async function ensureOffscreenDocument() {
-  const offscreenUrl = chrome.runtime.getURL('offscreen.html');
-  if (chrome.runtime.getContexts) {
-    const existing = await chrome.runtime.getContexts({
-      contextTypes: ['OFFSCREEN_DOCUMENT'],
-      documentUrls: [offscreenUrl]
-    });
-    if (existing.length > 0) return;
-  }
+// Create and close calls share one chain, so a close can never interleave with a create.
+function runOffscreenTask(task) {
+  const run = offscreenQueue.then(task);
+  offscreenQueue = run.catch(() => {});
+  return run;
+}
 
-  if (creatingOffscreen) {
-    await creatingOffscreen;
-    return;
-  }
-
-  creatingOffscreen = chrome.offscreen.createDocument({
-    url: 'offscreen.html',
-    reasons: ['DOM_PARSER'],
-    justification: 'Convert X.com MP4 GIFs to real .gif files using video and canvas elements'
+async function hasOffscreenDocument() {
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+    documentUrls: [chrome.runtime.getURL(OFFSCREEN_PATH)]
   });
-
-  try {
-    await creatingOffscreen;
-  } finally {
-    creatingOffscreen = null;
-  }
+  return contexts.length > 0;
 }
 
 async function convertGifViaOffscreen(mp4Url) {
-  await ensureOffscreenDocument();
-  const res = await chrome.runtime.sendMessage({
-    type: 'CONVERT_MP4_TO_GIF',
-    mp4Url
-  });
-  if (!res || !res.ok || !res.dataUrl) {
-    throw new Error(res?.error || 'GIF 변환 실패');
+  activeConversions += 1;
+  try {
+    await runOffscreenTask(async () => {
+      if (await hasOffscreenDocument()) return;
+      await chrome.offscreen.createDocument({
+        url: OFFSCREEN_PATH,
+        reasons: ['BLOBS'],
+        justification: 'Convert X.com MP4 GIFs to .gif files using video, canvas and Blob objects'
+      });
+    });
+    const res = await chrome.runtime.sendMessage({ type: 'CONVERT_MP4_TO_GIF', mp4Url });
+    if (!res?.ok || !res.dataUrl) {
+      throw new Error(res?.error || 'GIF 변환 실패');
+    }
+    return res.dataUrl;
+  } finally {
+    activeConversions -= 1;
+    // Offscreen documents without AUDIO_PLAYBACK never close on their own, so release it when idle.
+    // The count is re-checked inside the chain because another conversion may start meanwhile.
+    runOffscreenTask(async () => {
+      if (activeConversions === 0 && (await hasOffscreenDocument())) {
+        await chrome.offscreen.closeDocument();
+      }
+    }).catch((err) => console.warn('[X-MEDIA-DL] Offscreen close failed:', err));
   }
-  return res.dataUrl;
+}
+
+// Serialized so concurrent download requests do not overwrite each other's increments.
+function addDownloadCount(amount) {
+  downloadCountQueue = downloadCountQueue
+    .then(async () => {
+      const { downloadCount } = await chrome.storage.sync.get({ downloadCount: 0 });
+      await chrome.storage.sync.set({ downloadCount: (Number(downloadCount) || 0) + amount });
+    })
+    .catch((err) => console.warn('[X-MEDIA-DL] downloadCount update failed:', err));
+  return downloadCountQueue;
 }
 
 async function fetchSyndicationMedia(tweetId) {
@@ -212,20 +207,17 @@ async function fetchSyndicationMedia(tweetId) {
 async function downloadItems(items, settings, folderPath, username, tweetId) {
   let started = 0;
   let failed = 0;
+  let lastError = '';
   let cursor = 0;
   const concurrency = 3;
 
   async function processOne(item, index) {
     let downloadUrl = item.url;
-    let ext = item.ext || (item.type === 'video' ? 'mp4' : 'jpg');
+    let ext = item.type === 'image' ? item.ext : 'mp4';
 
-    if (item.type === 'gif') {
-      if (settings.convertGif) {
-        downloadUrl = await convertGifViaOffscreen(item.url);
-        ext = 'gif';
-      } else {
-        ext = 'mp4';
-      }
+    if (item.type === 'gif' && settings.convertGif) {
+      downloadUrl = await convertGifViaOffscreen(item.url);
+      ext = 'gif';
     }
 
     const filename = buildFilename({
@@ -261,13 +253,14 @@ async function downloadItems(items, settings, folderPath, username, tweetId) {
       } catch (err) {
         console.error('[X-MEDIA-DL] Download failed:', items[idx]?.url, err);
         failed += 1;
+        lastError = err?.message || lastError;
       }
     }
   }
 
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
   await Promise.all(workers);
-  return { started, failed };
+  return { started, failed, lastError };
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -304,40 +297,43 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === 'DOWNLOAD_MEDIA' || message?.type === 'DOWNLOAD_IMAGES') {
+  if (message?.type === 'DOWNLOAD_MEDIA') {
     (async () => {
       try {
-        const rawItems = Array.isArray(message.items)
-          ? message.items
-          : Array.isArray(message.images)
-            ? message.images.map((img) => ({ ...img, type: 'image' }))
-            : [];
+        const rawItems = Array.isArray(message.items) ? message.items : [];
+        const items = rawItems.slice(0, MAX_ITEMS_PER_REQUEST).map(toSafeItem).filter(Boolean);
+        const rejected = rawItems.length - items.length;
+        if (rejected > 0) {
+          console.warn(`[X-MEDIA-DL] Dropped ${rejected} media item(s) that failed validation`);
+        }
 
-        if (rawItems.length === 0) {
-          sendResponse({ ok: false, error: '다운로드할 미디어가 없습니다.' });
+        if (items.length === 0) {
+          sendResponse({ ok: false, error: '다운로드할 수 있는 미디어가 없습니다.' });
           return;
         }
 
         const settings = await getSettings();
         const targetFolderPath = resolveActiveFolderPath(settings, message.folderPath);
-        const { started, failed } = await downloadItems(
-          rawItems,
+        const username = typeof message.username === 'string' ? message.username.replace(/\W/g, '_') : '';
+        const tweetId = TWEET_ID_PATTERN.test(message.tweetId) ? message.tweetId : '';
+        const { started, failed, lastError } = await downloadItems(
+          items,
           settings,
           targetFolderPath,
-          message.username,
-          message.tweetId
+          username,
+          tweetId
         );
 
         if (started > 0) {
-          const nextCount = (Number(settings.downloadCount) || 0) + started;
-          await chrome.storage.sync.set({ downloadCount: nextCount });
+          await addDownloadCount(started);
         }
 
         sendResponse({
           ok: started > 0,
           total: rawItems.length,
           started,
-          failed
+          failed: failed + rejected,
+          error: started > 0 ? undefined : lastError || undefined
         });
       } catch (err) {
         console.error('[X-MEDIA-DL] Error handling DOWNLOAD_MEDIA:', err);
@@ -350,6 +346,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'FETCH_SYNDICATION_MEDIA') {
     (async () => {
       try {
+        if (!TWEET_ID_PATTERN.test(message.tweetId)) {
+          sendResponse({ ok: false, items: [], error: '잘못된 트윗 ID' });
+          return;
+        }
         const items = await fetchSyndicationMedia(message.tweetId);
         sendResponse({ ok: true, items });
       } catch (err) {

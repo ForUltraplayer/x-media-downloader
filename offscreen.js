@@ -1,6 +1,10 @@
 (() => {
   'use strict';
 
+  const HEARTBEAT_MS = 10000;
+  const FETCH_TIMEOUT_MS = 30000;
+  const MEDIA_EVENT_TIMEOUT_MS = 15000;
+
   function blobToDataUrl(blob) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -10,6 +14,8 @@
     });
   }
 
+  // The timeout matters: the heartbeat keeps the service worker alive, so a stalled
+  // video must fail here instead of hanging the conversion forever.
   function waitForEvent(target, eventName) {
     return new Promise((resolve, reject) => {
       const onOk = () => {
@@ -20,7 +26,12 @@
         cleanup();
         reject(new Error(`Video error during ${eventName}`));
       };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timed out waiting for ${eventName}`));
+      }, MEDIA_EVENT_TIMEOUT_MS);
       const cleanup = () => {
+        clearTimeout(timer);
         target.removeEventListener(eventName, onOk);
         target.removeEventListener('error', onErr);
       };
@@ -30,7 +41,7 @@
   }
 
   async function convertMp4ToGifDataUrl(mp4Url) {
-    const res = await fetch(mp4Url);
+    const res = await fetch(mp4Url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) {
       throw new Error(`MP4 fetch failed: ${res.status}`);
     }
@@ -97,6 +108,12 @@
       return false;
     }
 
+    // The service worker only awaits our reply, and Chrome does not document that as
+    // resetting its 30 s idle timer. Messages sent from an offscreen document do (Chrome 109+).
+    const heartbeat = setInterval(() => {
+      chrome.runtime.sendMessage({ type: 'GIF_CONVERT_HEARTBEAT' }).catch(() => {});
+    }, HEARTBEAT_MS);
+
     (async () => {
       try {
         const dataUrl = await convertMp4ToGifDataUrl(message.mp4Url);
@@ -104,6 +121,8 @@
       } catch (err) {
         console.error('[X-MEDIA-DL] Offscreen GIF conversion failed:', err);
         sendResponse({ ok: false, error: err?.message || 'GIF 변환 실패' });
+      } finally {
+        clearInterval(heartbeat);
       }
     })();
 

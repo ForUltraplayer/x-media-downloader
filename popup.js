@@ -1,20 +1,5 @@
-const DEFAULT_PRESETS = [
-  { id: 'preset_default', name: 'X_Images', folderPath: 'X_Images' }
-];
-
-const DEFAULT_SETTINGS = {
-  folderPath: 'X_Images',
-  presets: DEFAULT_PRESETS,
-  activePresetId: 'preset_default',
-  useBaseFolder: false,
-  baseFolderPath: 'X_Images',
-  clickMode: 'instant_hover',
-  rememberPreset: false,
-  subfolderByUser: false,
-  convertGif: true,
-  filenamePattern: 'user_id_index',
-  downloadCount: 0
-};
+// Loaded before this file by popup.html.
+const { DEFAULT_SETTINGS, sanitizeFolderPath, normalizePresets, pickActivePresetId } = XMediaSettings;
 
 const useBaseFolderInput = document.getElementById('useBaseFolder');
 const baseFolderPathInput = document.getElementById('baseFolderPath');
@@ -33,44 +18,6 @@ const openFolderBtn = document.getElementById('openFolderBtn');
 
 let presetsState = [];
 let activePresetId = 'preset_default';
-
-function sanitizeSegment(segment) {
-  return String(segment || '')
-    .replace(/[<>:"|?*\x00-\x1F]/g, '_')
-    .replace(/^\.+|\.+$/g, '')
-    .trim();
-}
-
-function sanitizeFolderPath(rawPath) {
-  if (!rawPath) return '';
-  return String(rawPath)
-    .replace(/\\/g, '/')
-    .split('/')
-    .map(sanitizeSegment)
-    .filter((seg) => seg && seg !== '.' && seg !== '..')
-    .join('/');
-}
-
-function normalizePresets(stored) {
-  if (Array.isArray(stored.presets) && stored.presets.length > 0) {
-    return stored.presets.map((p, idx) => {
-      const folderPath = sanitizeFolderPath(p.folderPath);
-      return {
-        id: String(p.id || `preset_${idx + 1}`),
-        name: folderPath || '다운로드(기본)',
-        folderPath
-      };
-    });
-  }
-  const legacyFolder = sanitizeFolderPath(stored.folderPath ?? DEFAULT_SETTINGS.folderPath);
-  return [
-    {
-      id: 'preset_default',
-      name: legacyFolder || '다운로드(기본)',
-      folderPath: legacyFolder
-    }
-  ];
-}
 
 function getActivePreset() {
   return presetsState.find((p) => p.id === activePresetId) || presetsState[0];
@@ -217,9 +164,7 @@ async function loadSettings() {
   const settings = { ...DEFAULT_SETTINGS, ...stored };
 
   presetsState = normalizePresets(settings);
-  activePresetId = presetsState.some((p) => p.id === settings.activePresetId)
-    ? settings.activePresetId
-    : presetsState[0].id;
+  activePresetId = pickActivePresetId(presetsState, settings.activePresetId);
 
   useBaseFolderInput.checked = Boolean(settings.useBaseFolder);
   baseFolderPathInput.value = settings.baseFolderPath ?? 'X_Images';
